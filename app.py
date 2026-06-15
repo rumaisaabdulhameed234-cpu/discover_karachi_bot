@@ -112,4 +112,4 @@ if prompt := st.chat_input("ask me about cafes and places in karachi..."):
 
     st.session_state.messages.append({"role": "assistant", "content": bot_reply})
     st.rerun()
-        st.rerun()
+        
