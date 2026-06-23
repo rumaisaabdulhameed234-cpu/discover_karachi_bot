@@ -1,6 +1,10 @@
 import streamlit as st
-from groq import Groq
 import random
+from groq import Groq
+import os
+import html
+import re
+from rag_utils import search_places  # 🔍 Importing your RAG search utility
 
 st.set_page_config(
     page_title="Discover Karachi",
@@ -10,8 +14,11 @@ st.set_page_config(
 
 # Load CSS from external file
 def load_css(file_name):
-    with open(file_name) as f:
-        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    if os.path.exists(file_name):
+        with open(file_name) as f:
+            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    else:
+        st.warning("style.css not found — running without styling")
 
 load_css("style.css")
 
@@ -41,41 +48,46 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# Fetch the API key securely from Streamlit's environment secrets
-client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+# Groq client
+client = Groq(api_key = "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")
 
-# System prompt
+# System prompt (Enforces utilizing the RAG context details safely)
 system_prompt = """
-You are Discover Karachi, a warm and friendly chatbot that ONLY answers questions 
+You are Discover Karachi, a warm and friendly chatbot that answers questions 
 about restaurants, cafes, food spots, and places to visit in Karachi, Pakistan.
 
-Always be warm, friendly and conversational. Give specific place names, areas and price ranges when possible.
+IMPORTANT RULES:
+- Only recommend places from the provided context database.
+- Do NOT make up places or list facts outside what is verified in the retrieved documents.
+- Always mention the area, price range, and vibe.
+- Keep your tone warm, welcoming, and conversational.
 
 If asked anything NOT about Karachi food or places, say:
 "I only know about food and places in Karachi! Ask me about cafes, restaurants or spots to visit."
+
+FORMATTING RULES (very important):
+- Respond in plain, natural text only.
+- NEVER include HTML tags (like <div>, <span>, <br>) in your response.
+- NEVER include markdown syntax like **bold**, ##, or backticks.
+- Just write normal sentences, like you're chatting with a friend.
 """
+
+def clean_reply(text: str) -> str:
+    """Safety net: strip any stray HTML tags the model might emit."""
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    return text.strip()
 
 # Session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display welcome message if chat is empty
-if not st.session_state.messages:
-    st.markdown(f"""
-        <div class="bot-polaroid">
-            <div class="polaroid-card tilt-left">
-                Hello! I'm Discover Karachi, your go-to guide for all the best food spots and places to visit in Karachi. What kind of cuisine are you craving today? Are you looking for a cozy cafe in Clifton, a delicious desi meal in Gulshan, or maybe some mouth-watering BBQ in DHA? Let me know, and I'd be happy to help!
-                <div class="polaroid-label">— discover karachi</div>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
-
-# Display chat history
+# Display chat history (Preserves your custom user bubbles and polaroids!)
 for message in st.session_state.messages:
     if message["role"] == "user":
         st.markdown(f"""
             <div class="user-bubble">
-                <div class="user-bubble-inner">{message["content"]}</div>
+                <div class="user-bubble-inner">{html.escape(message["content"])}</div>
             </div>
         """, unsafe_allow_html=True)
     else:
@@ -83,7 +95,7 @@ for message in st.session_state.messages:
         st.markdown(f"""
             <div class="bot-polaroid">
                 <div class="polaroid-card {tilt}">
-                    {message["content"]}
+                    {html.escape(message["content"])}
                     <div class="polaroid-label">— discover karachi</div>
                 </div>
             </div>
@@ -94,22 +106,53 @@ if prompt := st.chat_input("ask me about cafes and places in karachi..."):
 
     st.markdown(f"""
         <div class="user-bubble">
-            <div class="user-bubble-inner">{prompt}</div>
+            <div class="user-bubble-inner">{html.escape(prompt)}</div>
         </div>
     """, unsafe_allow_html=True)
 
     st.session_state.messages.append({"role": "user", "content": prompt})
 
     with st.spinner("finding the best spots for you..."):
+
+        # 🔍 Step 1: Run RAG retrieval script using the user query
+        results = search_places(prompt)
+
+        # Step 2: Format the retrieved location context beautifully
+        context = "\n".join([
+            f"{r['name']} ({r['area']}): {r['description']} | Price: {r['price']} | Vibe: {r['vibe']}"
+            for r in results
+        ])
+
+        # Step 3: Inject the custom database snapshot directly into the conversation instructions
+        rag_prompt = f"""
+User query: {prompt}
+
+Relevant Karachi places from database:
+{context}
+
+Answer using ONLY the database places listed above. Respond in plain text with no HTML or markdown.
+"""
+
+        # Step 4: Call Groq API model supplying context data along with history logs
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": system_prompt}
-            ] + st.session_state.messages,
+                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": rag_prompt}
+            ] + st.session_state.messages[:-1],  # pass history excluding the duplicate prompt we attached
             max_tokens=500
         )
-        bot_reply = response.choices.message.content
+        bot_reply = clean_reply(response.choices[0].message.content)
+
+    # Step 5: Render inside your stylized Polaroid view block element
+    tilt = "tilt-left" if random.random() > 0.5 else "tilt-right"
+    st.markdown(f"""
+        <div class="bot-polaroid">
+            <div class="polaroid-card {tilt}">
+                {html.escape(bot_reply)}
+                <div class="polaroid-label">— discover karachi</div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
 
     st.session_state.messages.append({"role": "assistant", "content": bot_reply})
-    st.rerun()
-        
